@@ -1,7 +1,7 @@
 # Lyrate
 
-Fetch song lyrics from [LRCLIB](https://lrclib.net), a free lyrics API that
-needs no key and no registration.
+Fetch song lyrics - plain or time-synced - from a pool of sources, and show
+them live against whatever is playing on Plex.
 
 ## Setup
 
@@ -14,14 +14,55 @@ pip install -r requirements.txt
 ## Usage
 
 ```python
-from main import get_lyrics
+from lyric_engine import get_lyrics, get_best
 
-print(get_lyrics(title="Daddy Cool", artist="Boney M.", duration=189))
-# [00:05.79] She's crazy like a fool
+# Just the words, as an LRC string:
+lyrics = get_lyrics(title="Daddy Cool", artist="Boney M.", duration=206)
+
+# Or the whole candidate, to see where it came from:
+best = get_best("Daddy Cool", 206, "Boney M.")
+print(best["source"], best["synced"], best["span"])   # e.g. spotdl True 175.15
 ```
 
-Returns time-synced LRC lyrics as a string, or `None` if nothing matched.
-Pass `synced=False` for plain text instead.
+`get_lyrics` returns time-synced LRC as a string, or `None` if no source had
+it. Pass `synced=False` for plain text instead. `duration` is in seconds and
+is what decides which version of a song you get.
+
+### Where lyrics come from
+
+Two sources are consulted:
+
+- **LRCLIB** directly. It matches on the track's duration, which is the
+  strongest signal for picking the right version of a song.
+- **spotdl**, which first resolves the track against Spotify and then searches
+  `syncedlyrics` - Deezer, Genius, Lrclib, Lyricsify, Megalobiz, Musixmatch
+  and NetEase. That is six providers LRCLIB alone does not cover.
+
+Both answers are judged against the same thing: how far the lyrics run
+compared with how long the file actually is. A candidate whose last timestamp
+runs *past* the end of the file is a different, longer recording and is
+rejected. One that fits is preferred from spotdl, because it got there by
+confirming the track against Spotify rather than by matching a string.
+
+**Spotify always answers**, even when nothing matches - search for a made-up
+song and it will confidently return somebody else's track. So a result is only
+believed when the title and artist genuinely resemble what was asked for and,
+when a duration is known, the lengths agree within a few seconds. Otherwise
+the match is discarded and that source simply contributes nothing.
+
+Compilation tags are handled: an artist of "Various Artists" is ignored as a
+match key rather than compared against, since it is tagged on everything.
+
+The two sources answer at very different speeds - LRCLIB in about a second,
+spotdl in about ten, because of the Spotify lookup. Waiting for both would
+leave the first verse of every new track blank, so the fast answer is shown
+immediately and quietly replaced if spotdl turns out to have the better match.
+The page only re-renders when the words actually change: the two sources often
+hold the identical LRC file, and re-rendering then would throw away wherever
+you had scrolled to.
+
+Set `SPOTDL=0` to switch the second source off, or `SPOTDL_TIMEOUT` to change
+how long it may take (12 seconds by default).
 
 ### Why duration matters
 
@@ -71,12 +112,14 @@ playing. Getting a Plex token is described at
 ### How it works
 
 - `plex_engine.py` reads `/status/sessions` from Plex and keeps the music ones.
-- `lyric_engine.py` looks the track up on LRCLIB, matching on duration.
+- `lyric_engine.py` asks the lyric sources and picks between their answers.
+- `spotdl_engine.py` is the second source: Spotify for metadata, then
+  `syncedlyrics` for the LRC itself.
 - `web.py` glues the two together and serves the page.
 
 The browser polls `/api/now-playing` every 2 seconds but advances the playhead
 locally between polls, so the highlight tracks the music smoothly rather than
-stepping every 2 seconds. Lyrics are cached per track, since LRCLIB is
+stepping every 2 seconds. Lyrics are cached per track, since the sources are
 rate-limited and the page polls continuously.
 
 Album art is proxied through `/api/art` because fetching it from Plex needs the

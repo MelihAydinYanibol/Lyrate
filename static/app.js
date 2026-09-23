@@ -86,6 +86,8 @@ const state = {
   lastReported: null, // last raw position Plex gave us, to spot fresh reports
   offset: 0,          // manual LYRICS_OFFSET from the server
   lines: [],          // [{time, text}], time is null for unsynced lyrics
+  lyricsId: null,     // identifies the lyrics on screen, so a better source
+                      // arriving mid-track can replace them
   synced: false,
   nodes: [],          // the rendered .line elements, index-aligned with lines
   activeIndex: -1,
@@ -569,6 +571,15 @@ async function poll() {
     renderMeta(track);
     setArtwork(track.thumb);
     renderLyrics(data.lyrics);
+    state.lyricsId = data.lyrics ? data.lyrics.id : null;
+  } else {
+    // The server consults the slower lyric sources in the background, so a
+    // better match can land while the same track is still playing.
+    const id = data.lyrics ? data.lyrics.id : null;
+    if (id !== state.lyricsId) {
+      state.lyricsId = id;
+      renderLyrics(data.lyrics);
+    }
   }
 
   state.offset = data.offset || 0;

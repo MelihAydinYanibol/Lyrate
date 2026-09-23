@@ -1,14 +1,15 @@
 """Lyrate web UI - a live lyrics display for whatever is playing on Plex."""
 
+import hashlib
 import os
-import re
+import threading
 import time
 
 import dotenv
 import requests
 from flask import Flask, Response, jsonify, render_template, request
 
-from lyric_engine import get_lyrics
+from lyric_engine import choose, get_best, parse_lrc
 import plex_engine
 from plex_engine import DEFAULT_TOKEN, DEFAULT_URL, get_now_playing
 
@@ -33,33 +34,6 @@ QUEUE_TTL = 10.0
 # with no lyrics is not retried on every poll.
 _lyrics_cache = {}
 
-# Matches an LRC timestamp: [mm:ss.xx], [mm:ss.xxx] or [mm:ss]
-TIMESTAMP = re.compile(r"\[(\d+):(\d{2}(?:[.:]\d+)?)\]")
-
-
-def parse_lrc(lrc: str):
-    """
-    Turns an LRC string into a list of {"time": seconds, "text": str} lines.
-
-    Lines with no timestamp (LRC metadata like "[ar:Boney M.]") are skipped.
-    Timestamped lines with empty text are kept: they mark instrumental gaps,
-    which the UI shows as a pause indicator.
-    """
-    lines = []
-    for raw in lrc.splitlines():
-        stamps = TIMESTAMP.findall(raw)
-        if not stamps:
-            continue
-        text = TIMESTAMP.sub("", raw).strip()
-        for minutes, seconds in stamps:
-            lines.append(
-                {"time": int(minutes) * 60 + float(seconds.replace(":", ".")),
-                 "text": text}
-            )
-    lines.sort(key=lambda line: line["time"])
-    return lines
-
-
 def pick_track(tracks):
     """Choose which session to follow: a playing one, from OBSERVED_USER."""
     if OBSERVED_USER:
@@ -69,43 +43,101 @@ def pick_track(tracks):
     return (playing or tracks or [None])[0]
 
 
-def lyrics_for(track):
-    """Fetch and parse lyrics for a track, caching the result per track."""
-    key = (track.get("title"), track.get("artist"), track.get("duration"))
-    if key not in _lyrics_cache:
-        synced = None
-        try:
-            synced = get_lyrics(
-                title=track["title"],
-                duration=track["duration"],
-                artist=track.get("artist"),
-                album=track.get("album"),
-                synced=True,
-            )
-        except requests.RequestException:
-            return None  # transient: do not cache, retry on the next poll
+# The winning candidate behind each cached entry, so a later, better one can
+# be compared against it.
+_candidates = {}
+_lyrics_lock = threading.Lock()
+_upgrading = set()
 
-        if synced:
-            _lyrics_cache[key] = {"synced": True, "lines": parse_lrc(synced)}
-        else:
-            # No synced version: fall back to plain text, shown unhighlighted.
-            try:
-                plain = get_lyrics(
-                    title=track["title"],
-                    duration=track["duration"],
-                    artist=track.get("artist"),
-                    album=track.get("album"),
-                    synced=False,
-                )
-            except requests.RequestException:
-                return None
-            _lyrics_cache[key] = (
-                {"synced": False,
-                 "lines": [{"time": None, "text": t} for t in plain.splitlines()]}
-                if plain
-                else None
-            )
+
+def _entry(best):
+    """Turn a pool candidate into what the browser receives."""
+    if not best:
+        return None
+    lines = (parse_lrc(best["lrc"]) if best["synced"]
+             else [{"time": None, "text": t} for t in best["lrc"].splitlines()])
+    return {
+        "synced": best["synced"],
+        "lines": lines,
+        "source": best.get("source"),
+        "span": best.get("span"),
+        # Identifies the lyrics by their CONTENT, so the page re-renders only
+        # when the words actually change. Two sources often hold the same LRC
+        # file, and re-rendering then would throw away the reader's scroll
+        # position for nothing.
+        "id": hashlib.sha1(best["lrc"].encode("utf-8")).hexdigest()[:12],
+    }
+
+
+def _find(track, sources, synced=True):
+    """One pool lookup, synced first and plain text as a fallback."""
+    best = get_best(
+        title=track["title"], duration=track["duration"],
+        artist=track.get("artist"), album=track.get("album"),
+        synced=True, sources=sources,
+    )
+    if not best:
+        best = get_best(
+            title=track["title"], duration=track["duration"],
+            artist=track.get("artist"), album=track.get("album"),
+            synced=False, sources=sources,
+        )
+    return best
+
+
+def _upgrade(key, track):
+    """Ask the slow sources in the background and keep the better answer."""
+    try:
+        candidate = _find(track, ("spotdl",))
+        if not candidate:
+            return
+        with _lyrics_lock:
+            current = _candidates.get(key)
+            winner = choose([current, candidate], track.get("duration"))
+            if winner is candidate:
+                _candidates[key] = candidate
+                _lyrics_cache[key] = _entry(candidate)
+    except Exception:
+        pass          # a failed upgrade just leaves the first answer in place
+    finally:
+        _upgrading.discard(key)
+
+
+def lyrics_for(track):
+    """
+    Lyrics for a track, cached, with the slow sources consulted in the
+    background.
+
+    LRCLIB answers in about a second and spotdl in about ten, so waiting for
+    both would leave the first verse of every new track blank. The fast
+    answer is shown straight away and quietly replaced if spotdl turns out to
+    have a better match.
+    """
+    key = (track.get("title"), track.get("artist"), track.get("duration"))
+
+    if key not in _lyrics_cache:
+        try:
+            fast = _find(track, ("lrclib",))
+        except requests.RequestException:
+            return None      # transient: do not cache, retry on the next poll
+        with _lyrics_lock:
+            _candidates[key] = fast
+            _lyrics_cache[key] = _entry(fast)
+
+    # Consult the slower pool once per track, whatever the fast one found.
+    if key not in _upgrading and spotdl_available():
+        _upgrading.add(key)
+        threading.Thread(target=_upgrade, args=(key, track), daemon=True).start()
+
     return _lyrics_cache[key]
+
+
+def spotdl_available():
+    try:
+        import spotdl_engine
+        return spotdl_engine.available()
+    except Exception:
+        return False
 
 
 def queue_state_for(track):
