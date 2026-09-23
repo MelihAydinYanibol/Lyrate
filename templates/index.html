@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#07070a">
+<title>Lyrate</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<!-- Blurred artwork backdrop, tinted by the art itself -->
+<div class="backdrop"><img id="backdrop-art" alt=""></div>
+
+<main class="stage" id="stage">
+
+  <aside class="track-panel">
+    <div class="artwork">
+      <img id="art" alt="">
+      <div class="artwork-fallback" id="art-fallback">&#9834;</div>
+    </div>
+
+    <div class="meta">
+      <h1 id="title">&nbsp;</h1>
+      <p class="artist" id="artist"></p>
+      <p class="album" id="album"></p>
+    </div>
+
+    <div class="progress">
+      <!-- role=slider: click or use arrow keys to seek -->
+      <div class="progress-track" id="progress-track" role="slider" tabindex="0"
+           aria-label="Seek" aria-valuemin="0" aria-valuenow="0" aria-valuemax="0">
+        <div class="progress-fill" id="progress-fill"></div>
+        <div class="progress-knob" id="progress-knob"></div>
+      </div>
+      <div class="progress-times">
+        <span id="elapsed">0:00</span>
+        <span id="total">0:00</span>
+      </div>
+    </div>
+
+    <div class="controls" id="controls">
+      <button class="ctl" id="btn-prev" title="Previous" aria-label="Previous track">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M7 6v12M19 6.8v10.4a.8.8 0 0 1-1.24.66l-7.8-5.2a.8.8 0 0 1 0-1.32l7.8-5.2A.8.8 0 0 1 19 6.8z"/>
+        </svg>
+      </button>
+
+      <button class="ctl ctl-primary" id="btn-play" title="Play/Pause"
+              aria-label="Play or pause">
+        <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M8 5.6v12.8a.7.7 0 0 0 1.08.59l9.6-6.4a.7.7 0 0 0 0-1.18l-9.6-6.4A.7.7 0 0 0 8 5.6z"/>
+        </svg>
+        <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M8 5h3v14H8zM13 5h3v14h-3z"/>
+        </svg>
+      </button>
+
+      <button class="ctl" id="btn-next" title="Next" aria-label="Next track">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M17 6v12M5 6.8v10.4a.8.8 0 0 0 1.24.66l7.8-5.2a.8.8 0 0 0 0-1.32l-7.8-5.2A.8.8 0 0 0 5 6.8z"/>
+        </svg>
+      </button>
+    </div>
+
+    <p class="source" id="source"></p>
+    <!-- Shows why a control failed, rather than failing silently -->
+    <p class="ctl-error" id="ctl-error" role="status"></p>
+  </aside>
+
+  <section class="lyrics-panel">
+    <div class="lyrics-scroll" id="lyrics-scroll" tabindex="0">
+      <div class="lyrics" id="lyrics"></div>
+    </div>
+
+    <!-- Appears when you scroll away from the line being sung -->
+    <button class="jump-back" id="jump-back" type="button" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 16.5 5.2 9.7a1 1 0 0 1 1.4-1.4l5.4 5.4 5.4-5.4a1 1 0 1 1 1.4 1.4z"/>
+      </svg>
+      Jump to current line
+    </button>
+  </section>
+
+</main>
+
+<!-- Shown when nothing is playing, or Plex is unreachable -->
+<div class="idle" id="idle">
+  <div class="idle-inner">
+    <div class="idle-mark">&#9834;</div>
+    <p id="idle-text">Waiting for music&hellip;</p>
+    <p class="idle-sub" id="idle-sub"></p>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

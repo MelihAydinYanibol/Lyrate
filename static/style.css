@@ -1,0 +1,659 @@
+/* ---------------------------------------------------------------
+   Lyrate - live lyrics display
+   --------------------------------------------------------------- */
+
+:root {
+  --bg: #07070a;
+  --text: #ffffff;
+  --dim: rgba(255, 255, 255, 0.34);
+  --dimmer: rgba(255, 255, 255, 0.18);
+  --panel-w: 360px;
+  --gutter: 56px;
+  --line-gap: 0.46em;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  /* Dynamic viewport height: on phones the address bar shows and hides, and
+     100vh stays at its largest, which pushes the controls off screen. */
+  height: 100dvh;
+  margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;   /* no pull-to-refresh while scrolling lyrics */
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto,
+               "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Blurred artwork backdrop ---------------------------------- */
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.backdrop img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Heavy blur plus scale so the art edges never show through */
+  filter: blur(90px) saturate(180%) brightness(0.55);
+  transform: scale(1.35);
+  opacity: 0;
+  transition: opacity 1.2s var(--ease);
+}
+
+.backdrop img.loaded { opacity: 1; }
+
+/* Darkening veil so white text always clears contrast */
+.backdrop::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 90% at 20% 15%, rgba(0,0,0,0.15), rgba(0,0,0,0.78)),
+    linear-gradient(180deg, rgba(7,7,10,0.55), rgba(7,7,10,0.88));
+}
+
+/* --- Layout ---------------------------------------------------- */
+
+.stage {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  display: grid;
+  grid-template-columns: var(--panel-w) minmax(0, 1fr);
+  gap: var(--gutter);
+  /* Keep clear of notches and home indicators on phones. */
+  padding:
+    max(var(--gutter), env(safe-area-inset-top))
+    max(var(--gutter), env(safe-area-inset-right))
+    max(var(--gutter), env(safe-area-inset-bottom))
+    max(var(--gutter), env(safe-area-inset-left));
+  opacity: 0;
+  transition: opacity 0.6s var(--ease);
+}
+
+.stage.ready { opacity: 1; }
+
+/* --- Track panel ----------------------------------------------- */
+
+.track-panel {
+  align-self: center;
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  min-width: 0;
+}
+
+.artwork {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 14px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow:
+    0 28px 60px rgba(0, 0, 0, 0.55),
+    0 2px 10px rgba(0, 0, 0, 0.4),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.artwork img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  opacity: 0;
+  transition: opacity 0.7s var(--ease);
+}
+
+.artwork img.loaded { opacity: 1; }
+
+.artwork-fallback {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 68px;
+  color: rgba(255, 255, 255, 0.22);
+  transition: opacity 0.4s var(--ease);
+}
+
+.artwork-fallback.hidden { opacity: 0; }
+
+.meta { min-width: 0; }
+
+.meta h1 {
+  margin: 0 0 6px;
+  font-size: 27px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.22;
+  /* Long titles wrap to two lines, then ellipsis */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.meta .artist {
+  margin: 0 0 3px;
+  font-size: 17px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.meta .album,
+.source {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source { font-size: 12.5px; color: var(--dimmer); }
+
+/* --- Progress bar ---------------------------------------------- */
+
+.progress-track {
+  position: relative;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  cursor: pointer;
+  outline: none;
+  /* Invisible padding so the 4px bar is still easy to hit */
+  padding-block: 9px;
+  background-clip: content-box;
+  transition: background-color 0.2s var(--ease);
+}
+
+.progress-track:hover,
+.progress-track:focus-visible { background-color: rgba(255, 255, 255, 0.28); }
+
+.progress-track:focus-visible { box-shadow: 0 0 0 2px rgba(255,255,255,0.45); }
+
+.progress-fill {
+  position: absolute;
+  top: 9px;
+  left: 0;
+  height: 4px;
+  width: 0%;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  transition: width 0.25s linear;
+  pointer-events: none;
+}
+
+/* Handle, revealed on hover, like a native scrubber.
+   The bar sits at y 9-13, so its centre line is 11. Centring a 10px dot on
+   that means top 6, not 11 - the dot was hanging 5px below the bar. */
+.progress-knob {
+  position: absolute;
+  top: 6px;
+  left: 0;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transform: scale(0.6);
+  transition: opacity 0.18s var(--ease), transform 0.18s var(--ease),
+              left 0.25s linear;
+  pointer-events: none;
+}
+
+.progress-track:hover .progress-knob,
+.progress-track:focus-visible .progress-knob { opacity: 1; transform: scale(1); }
+
+/* --- Transport controls ---------------------------------------- */
+
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  margin-top: -6px;
+}
+
+.ctl {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+  transition: color 0.18s var(--ease), background-color 0.18s var(--ease),
+              transform 0.12s var(--ease);
+}
+
+.ctl svg { width: 21px; height: 21px; fill: currentColor; }
+
+.ctl:hover { color: #fff; background: rgba(255, 255, 255, 0.1); }
+.ctl:active { transform: scale(0.92); }
+
+.ctl:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.5);
+}
+
+/* The play/pause button sits a size up, as on every music player */
+.ctl-primary {
+  width: 50px;
+  height: 50px;
+  background: rgba(255, 255, 255, 0.95);
+  color: #0b0b10;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+}
+
+.ctl-primary svg { width: 23px; height: 23px; }
+.ctl-primary:hover { background: #fff; color: #000; }
+
+/* Show exactly one of the two glyphs, per playback state */
+.ctl-primary .icon-pause { display: none; }
+.controls.playing .ctl-primary .icon-play { display: none; }
+.controls.playing .ctl-primary .icon-pause { display: block; }
+
+/* A player that does not accept commands gets visibly inert controls */
+.controls.disabled { opacity: 0.4; pointer-events: none; }
+
+/* Individual buttons disable when there is nowhere to skip to */
+.ctl:disabled {
+  opacity: 0.3;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* The track ran out rather than being paused: the play button restarts it,
+   so mark it as a replay instead of a resume. */
+.controls.ended .ctl-primary {
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
+  box-shadow: none;
+}
+
+/* Why the last command failed. Hidden until there is something to say. */
+.ctl-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #ff8f8f;
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  transition: opacity 0.25s var(--ease), max-height 0.25s var(--ease);
+}
+
+.ctl-error.visible { opacity: 1; max-height: 5.5em; }
+
+/* Flash a control red if Plex refused the command */
+.ctl.rejected { animation: reject 0.5s var(--ease); }
+
+@keyframes reject {
+  0%, 100% { color: inherit; }
+  30%      { color: #ff6b6b; transform: translateX(-2px); }
+  60%      { color: #ff6b6b; transform: translateX(2px); }
+}
+
+.progress-times {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 9px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+
+/* --- Lyrics ---------------------------------------------------- */
+
+.lyrics-panel {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.lyrics-scroll {
+  height: 100%;
+  /* Native scrolling, so the wheel, touch and keyboard all just work. The
+     auto-follow drives scrollTop; the scrollbar itself stays hidden. */
+  overflow-y: auto;
+  /* Without this, `overflow-y: auto` makes the x axis compute to `auto` too,
+     and the active line - scaled 1.2% wider than the panel - becomes a
+     horizontal scrollbar. Lines wrap, so there is nothing to scroll to. */
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: none;        /* Firefox */
+  -ms-overflow-style: none;     /* old Edge */
+  outline: none;
+  /* Fade the LYRICS out at the panel edges by masking the text itself.
+     Painting a dark gradient over the top instead would only match a flat
+     background, and shows as a grey rectangle over the blurred artwork. */
+  -webkit-mask-image: linear-gradient(to bottom,
+      transparent 0, #000 13%, #000 87%, transparent 100%);
+          mask-image: linear-gradient(to bottom,
+      transparent 0, #000 13%, #000 87%, transparent 100%);
+}
+
+.lyrics-scroll::-webkit-scrollbar { width: 0; height: 0; }
+
+.lyrics {
+  /* A starting point only: once the lines are measured, app.js replaces this
+     with exactly enough padding to centre the first and last ones. */
+  padding: 50vh 0;
+  /* Room for the active line to grow into when it scales up, so it is not
+     clipped by the overflow rule above. Slightly over the 1.2% it gains. */
+  padding-right: 1.5%;
+}
+
+/* Plain lyrics never have a "current" line to centre, so they start near the
+   top and are simply read top to bottom. */
+.lyrics.unsynced {
+  padding: 2vh 0 30vh;
+  padding-right: 1.5%;
+}
+
+.line {
+  margin: 0 0 var(--line-gap);
+  /* Long lines wrap. A single word longer than the panel - a URL, a run-on
+     lyric with no spaces - breaks rather than pushing the panel wider. */
+  overflow-wrap: anywhere;
+  font-size: clamp(26px, 3.1vw, 43px);
+  font-weight: 700;
+  letter-spacing: -0.022em;
+  line-height: 1.24;
+  color: var(--dim);
+  transform-origin: left center;
+  transition:
+    color 0.42s var(--ease),
+    opacity 0.42s var(--ease),
+    filter 0.42s var(--ease),
+    transform 0.42s var(--ease);
+}
+
+/* Lines already sung recede */
+.line.past {
+  color: var(--dimmer);
+  filter: blur(0.6px);
+}
+
+/* The line being sung */
+.line.active {
+  color: var(--text);
+  transform: scale(1.012);
+  text-shadow: 0 2px 26px rgba(0, 0, 0, 0.35);
+}
+
+/* Lines further ahead blur out progressively. This reads well while the view
+   is following the song, but the moment you scroll off to read ahead those
+   are exactly the lines you are trying to read - so `browsing` clears it. */
+.line.ahead-1 { filter: blur(0.5px); opacity: 0.92; }
+.line.ahead-2 { filter: blur(1.1px); opacity: 0.78; }
+.line.ahead-3 { filter: blur(1.9px); opacity: 0.6; }
+
+.lyrics.browsing .line {
+  filter: none;
+  opacity: 1;
+  /* Bright enough to actually read. Sung lines are normally pushed right
+     back, which is fine when following but useless when you have scrolled
+     up specifically to read them. */
+  color: rgba(255, 255, 255, 0.58);
+}
+
+/* The line being sung stays marked, just without the depth effects. */
+.lyrics.browsing .line.active { color: var(--text); }
+
+/* Instrumental gaps: a timestamped line carrying no words */
+.line.instrumental {
+  font-size: 0;
+  margin-bottom: 0.9em;
+}
+
+.line.instrumental::before {
+  content: "\2022 \2022 \2022";
+  font-size: 22px;
+  letter-spacing: 0.34em;
+  color: var(--dimmer);
+  transition: color 0.42s var(--ease);
+}
+
+.line.instrumental.active::before { color: rgba(255, 255, 255, 0.85); }
+
+/* Plain lyrics: no line is ever current, so show them all evenly */
+.lyrics.unsynced .line {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: clamp(19px, 1.7vw, 25px);
+  font-weight: 600;
+  filter: none;
+  opacity: 1;
+}
+
+/* --- Jump back to the current line ------------------------------ */
+
+.jump-back {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translate(-50%, 8px);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 16px 9px 13px;
+  border: 0;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0b0b10;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.22s var(--ease), transform 0.22s var(--ease);
+}
+
+.jump-back svg {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+  transition: transform 0.2s var(--ease);
+}
+
+/* The chevron points down by default. When the line being sung is above the
+   view, going back to it means scrolling up. */
+.jump-back.up svg { transform: rotate(180deg); }
+
+.jump-back.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  pointer-events: auto;
+}
+
+.jump-back:hover { background: #fff; }
+.jump-back:active { transform: translate(-50%, 0) scale(0.96); }
+
+.jump-back:focus-visible {
+  outline: none;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45), 0 0 0 2px rgba(255,255,255,0.6);
+}
+
+.lyrics-notice {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--dim);
+}
+
+/* Sits above plain lyrics, so they do not look like synced ones that broke */
+.unsynced-note {
+  margin: 0 0 1.4em;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--dimmer);
+}
+
+/* --- Idle / error state ---------------------------------------- */
+
+.idle {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  text-align: center;
+  padding: 24px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.5s var(--ease);
+}
+
+.idle.visible { opacity: 1; pointer-events: auto; }
+
+.idle-mark {
+  font-size: 46px;
+  color: rgba(255, 255, 255, 0.2);
+  margin-bottom: 18px;
+  animation: pulse 2.6s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 0.9; }
+}
+
+.idle p { margin: 0; font-size: 17px; font-weight: 600; color: var(--dim); }
+
+.idle-sub {
+  margin-top: 10px !important;
+  font-size: 13.5px !important;
+  font-weight: 500 !important;
+  color: var(--dimmer) !important;
+  max-width: 420px;
+  line-height: 1.5;
+}
+
+/* --- Responsive ------------------------------------------------- */
+
+/* Narrow: the two columns stack into a header strip plus the lyrics.
+   The progress bar and transport controls stay - a phone is exactly where
+   you want to scrub and skip without reaching for the player. */
+@media (max-width: 900px) {
+  :root { --gutter: 22px; }
+
+  .stage {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .track-panel {
+    align-self: start;
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    grid-template-areas:
+      "art  meta"
+      "bar  bar"
+      "ctl  ctl";
+    align-items: center;
+    column-gap: 14px;
+    row-gap: 12px;
+  }
+
+  .artwork { grid-area: art; width: 64px; border-radius: 9px; }
+  .artwork-fallback { font-size: 26px; }
+  .meta { grid-area: meta; }
+  .progress { grid-area: bar; }
+  .controls { grid-area: ctl; margin-top: 0; }
+
+  .meta h1 { font-size: 18px; margin-bottom: 2px; -webkit-line-clamp: 1; }
+  .meta .artist { font-size: 13.5px; }
+  .meta .album, .source { display: none; }
+
+  .line { font-size: clamp(21px, 5.4vw, 30px); }
+  /* Keep the room the scaled active line needs; a bare `padding` shorthand
+     here would silently drop it. */
+  .lyrics { padding-right: 2%; }
+  .lyrics.unsynced { padding-right: 2%; }
+
+  .jump-back { bottom: 12px; font-size: 12.5px; padding: 8px 14px 8px 11px; }
+}
+
+/* Phones */
+@media (max-width: 560px) {
+  :root { --gutter: 16px; }
+
+  .track-panel { grid-template-columns: 54px minmax(0, 1fr); column-gap: 12px; }
+  .artwork { width: 54px; border-radius: 8px; }
+  .artwork-fallback { font-size: 22px; }
+  .meta h1 { font-size: 16.5px; }
+  .meta .artist { font-size: 12.5px; }
+  .line { font-size: clamp(19px, 5.6vw, 26px); }
+  .progress-times { font-size: 11px; }
+}
+
+/* Landscape on a short screen: stacking wastes the height, so go back to
+   two columns and shrink everything instead. */
+@media (max-height: 520px) and (orientation: landscape) {
+  :root { --gutter: 14px; --panel-w: 210px; }
+
+  .stage { grid-template-columns: var(--panel-w) 1fr; gap: 18px; }
+
+  .track-panel {
+    display: flex;
+    flex-direction: column;
+    align-self: center;
+    /* The narrow block above centres grid children; in a column flex that
+       shrinks them to their content width instead of filling the column. */
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .artwork { width: 84px; }
+  .meta h1 { font-size: 15px; -webkit-line-clamp: 2; }
+  .meta .artist { font-size: 12px; }
+  .meta .album, .source { display: none; }
+  .line { font-size: clamp(17px, 3.4vw, 24px); }
+  .ctl { width: 30px; height: 30px; }
+  .ctl-primary { width: 38px; height: 38px; }
+}
+
+/* Touch devices have no hover, so the scrubber handle would never appear,
+   and the targets need to be finger-sized. */
+@media (hover: none) {
+  .progress-knob { opacity: 1; transform: scale(1); }
+  .progress-track { padding-block: 13px; }
+  .ctl { width: 44px; height: 44px; }
+  .ctl-primary { width: 56px; height: 56px; }
+  .controls { gap: 14px; }
+  /* A tap should not leave a button stuck in its hover colour. */
+  .ctl:hover { background: transparent; color: rgba(255, 255, 255, 0.72); }
+  .ctl-primary:hover { background: rgba(255, 255, 255, 0.95); color: #0b0b10; }
+}
+
+/* Respect a reduced-motion preference: keep the highlight, drop the glide */
+@media (prefers-reduced-motion: reduce) {
+  .line, .progress-fill, .backdrop img, .artwork img, .jump-back {
+    transition-duration: 0.01ms !important;
+  }
+  .idle-mark { animation: none; }
+}

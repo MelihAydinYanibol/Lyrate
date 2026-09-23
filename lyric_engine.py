@@ -54,7 +54,9 @@ def get_lyrics(
                 return lyrics
 
     # No artist, no exact match, or no synced lyrics on it: search instead.
-    query = " ".join(filter(None, [title, artist, album]))
+    # The album is deliberately left out of the query: LRCLIB's free-text
+    # search matches it poorly and including it usually returns nothing.
+    query = " ".join(filter(None, [title, artist]))
     response = requests.get(
         "https://lrclib.net/api/search",
         params={"q": query},

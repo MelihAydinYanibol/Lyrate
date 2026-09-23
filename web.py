@@ -1,0 +1,241 @@
+"""Lyrate web UI - a live lyrics display for whatever is playing on Plex."""
+
+import os
+import re
+import time
+
+import dotenv
+import requests
+from flask import Flask, Response, jsonify, render_template, request
+
+from lyric_engine import get_lyrics
+import plex_engine
+from plex_engine import DEFAULT_TOKEN, DEFAULT_URL, get_now_playing
+
+dotenv.load_dotenv()
+
+OBSERVED_USER = os.getenv("OBSERVED_USER")  # only follow this Plex user, if set
+
+# Nudge the lyric timing if it consistently runs early or late, in seconds.
+# Positive values push the lyrics later. Some Plex clients report their
+# position lazily, and some LRC files are simply transcribed a beat off.
+LYRICS_OFFSET = float(os.getenv("LYRICS_OFFSET", "0"))
+
+app = Flask(__name__)
+
+# Whether a next/previous track exists needs two extra requests, so it is
+# cached: it only changes when the track or the queue does.
+_queue_cache = {"key": None, "at": 0.0, "value": None}
+QUEUE_TTL = 10.0
+
+# LRCLIB is rate-limited and the browser polls every couple of seconds, so
+# lyrics are looked up once per track and kept. None is cached too, so a track
+# with no lyrics is not retried on every poll.
+_lyrics_cache = {}
+
+# Matches an LRC timestamp: [mm:ss.xx], [mm:ss.xxx] or [mm:ss]
+TIMESTAMP = re.compile(r"\[(\d+):(\d{2}(?:[.:]\d+)?)\]")
+
+
+def parse_lrc(lrc: str):
+    """
+    Turns an LRC string into a list of {"time": seconds, "text": str} lines.
+
+    Lines with no timestamp (LRC metadata like "[ar:Boney M.]") are skipped.
+    Timestamped lines with empty text are kept: they mark instrumental gaps,
+    which the UI shows as a pause indicator.
+    """
+    lines = []
+    for raw in lrc.splitlines():
+        stamps = TIMESTAMP.findall(raw)
+        if not stamps:
+            continue
+        text = TIMESTAMP.sub("", raw).strip()
+        for minutes, seconds in stamps:
+            lines.append(
+                {"time": int(minutes) * 60 + float(seconds.replace(":", ".")),
+                 "text": text}
+            )
+    lines.sort(key=lambda line: line["time"])
+    return lines
+
+
+def pick_track(tracks):
+    """Choose which session to follow: a playing one, from OBSERVED_USER."""
+    if OBSERVED_USER:
+        tracks = [t for t in tracks if t.get("user") == OBSERVED_USER]
+    playing = [t for t in tracks if t.get("state") == "playing"]
+    # Fall back to a paused track so the UI keeps showing the last song.
+    return (playing or tracks or [None])[0]
+
+
+def lyrics_for(track):
+    """Fetch and parse lyrics for a track, caching the result per track."""
+    key = (track.get("title"), track.get("artist"), track.get("duration"))
+    if key not in _lyrics_cache:
+        synced = None
+        try:
+            synced = get_lyrics(
+                title=track["title"],
+                duration=track["duration"],
+                artist=track.get("artist"),
+                album=track.get("album"),
+                synced=True,
+            )
+        except requests.RequestException:
+            return None  # transient: do not cache, retry on the next poll
+
+        if synced:
+            _lyrics_cache[key] = {"synced": True, "lines": parse_lrc(synced)}
+        else:
+            # No synced version: fall back to plain text, shown unhighlighted.
+            try:
+                plain = get_lyrics(
+                    title=track["title"],
+                    duration=track["duration"],
+                    artist=track.get("artist"),
+                    album=track.get("album"),
+                    synced=False,
+                )
+            except requests.RequestException:
+                return None
+            _lyrics_cache[key] = (
+                {"synced": False,
+                 "lines": [{"time": None, "text": t} for t in plain.splitlines()]}
+                if plain
+                else None
+            )
+    return _lyrics_cache[key]
+
+
+def queue_state_for(track):
+    """Cached "is there a next/previous track", or None if unknown."""
+    key = (track.get("rating_key"), track.get("machine_identifier"))
+    now = time.monotonic()
+    if _queue_cache["key"] != key or now - _queue_cache["at"] > QUEUE_TTL:
+        _queue_cache.update(
+            key=key, at=now, value=plex_engine.get_queue_state(track)
+        )
+    return _queue_cache["value"]
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/api/now-playing")
+def now_playing():
+    """Current track plus its lyrics, for the browser to poll."""
+    # Time the Plex call. The position it reports is accurate as of somewhere
+    # inside that call, so treat its midpoint as the moment of the reading;
+    # by the time the browser sees this response the reading has aged.
+    plex_started = time.monotonic()
+    try:
+        tracks = get_now_playing()
+    except requests.RequestException as exc:
+        return jsonify({"error": f"Cannot reach Plex: {exc}"}), 502
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    sampled_at = (plex_started + time.monotonic()) / 2
+
+    track = pick_track(tracks)
+    if not track:
+        return jsonify({"playing": False})
+
+    lyrics = lyrics_for(track) if track.get("duration") else None
+
+    return jsonify(
+        {
+            "playing": True,
+            "track": track,
+            "lyrics": lyrics,
+            # None means "could not tell", which the UI treats as "maybe",
+            # leaving the skip buttons enabled rather than wrongly greying
+            # them out.
+            "queue": queue_state_for(track),
+            # How stale the position reading already is. The browser adds this
+            # (plus its own round-trip) before interpolating, so the lyrics do
+            # not run behind by the length of the request.
+            "sample_age": time.monotonic() - sampled_at,
+            "offset": LYRICS_OFFSET,
+        }
+    )
+
+
+@app.route("/api/control/<command>", methods=["POST"])
+def control(command):
+    """Relay a transport command to whichever player we are following."""
+    body = request.get_json(silent=True) or {}
+
+    try:
+        tracks = get_now_playing()
+    except requests.RequestException as exc:
+        return jsonify({"error": f"Cannot reach Plex: {exc}"}), 502
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    track = pick_track(tracks)
+    if not track:
+        return jsonify({"error": "Nothing is playing"}), 409
+    if not track.get("machine_identifier"):
+        return jsonify({"error": "This player cannot be controlled"}), 409
+
+    # "playPause" is ours, not Plex's: turn it into the right command for
+    # whatever the player is doing right now.
+    if command == "playPause":
+        command = "pause" if track.get("state") == "playing" else "play"
+
+    # seekTo is given in seconds by the browser; Plex wants milliseconds.
+    value = body.get("value")
+    if command == "seekTo" and value is not None:
+        value = round(float(value) * 1000)
+
+    try:
+        result = plex_engine.command_for_track(track, command, value)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except plex_engine.PlexCommandError as exc:
+        # Pass the player's own words through, so the UI can show why.
+        return jsonify({"error": str(exc)}), 502
+    except requests.RequestException as exc:
+        return jsonify({"error": f"Cannot reach Plex: {exc}"}), 502
+
+    return jsonify({"ok": True, "command": command, "via": result.get("via")})
+
+
+@app.route("/api/art")
+def art():
+    """Proxy Plex artwork, which needs the token the browser must not have."""
+    path = request.args.get("path", "")
+    # Only ever proxy server-relative Plex paths.
+    if not path.startswith("/") or ".." in path:
+        return Response("bad path", status=400)
+
+    upstream = requests.get(
+        f"{DEFAULT_URL.rstrip('/')}{path}",
+        headers={"X-Plex-Token": DEFAULT_TOKEN},
+        timeout=10,
+    )
+    if not upstream.ok:
+        return Response("not found", status=upstream.status_code)
+
+    return Response(
+        upstream.content,
+        content_type=upstream.headers.get("Content-Type", "image/jpeg"),
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+if __name__ == "__main__":
+    # Localhost only by default. Set HOST=0.0.0.0 to reach it from a phone on
+    # the same network - but note that also exposes the artwork proxy and the
+    # playback controls to everyone on that network, with no authentication.
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "5000"))
+    if host not in ("127.0.0.1", "localhost"):
+        print(f" * Reachable on the local network at http://{host}:{port}")
+        print(" * Anyone on this network can control playback. Do not do this")
+        print("   on a network you do not trust.")
+    app.run(host=host, port=port, debug=True)
