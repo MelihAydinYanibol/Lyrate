@@ -25,6 +25,15 @@ const COMMAND_HOLD_MS = 25000;
 // Scrolling the lyrics yourself suspends the auto-follow. It resumes this
 // long after you stop, or immediately if you press the jump-back button.
 const RESUME_FOLLOW_MS = 7000;
+// One press of the nudge buttons, in seconds. Shift-click moves five times
+// as far, for when the lyrics are badly out rather than slightly off.
+const OFFSET_STEP = 0.1;
+const OFFSET_COARSE_STEP = 0.5;
+const OFFSET_LIMIT = 30;
+// After a press, ignore the server's value briefly so a poll in flight with
+// the old number cannot undo what was just set.
+const OFFSET_SETTLE_MS = 3000;
+
 // Breathing room above the first lyric, not a half-panel centring gap.
 const LYRICS_TOP_PAD = 24;
 // Within this of the track length, with nothing new arriving, the song is
@@ -63,6 +72,10 @@ const el = {
   progressTrack: document.getElementById('progress-track'),
   progressKnob: document.getElementById('progress-knob'),
   ctlError: document.getElementById('ctl-error'),
+  offsetControl: document.getElementById('offset-control'),
+  offsetMinus: document.getElementById('offset-minus'),
+  offsetPlus: document.getElementById('offset-plus'),
+  offsetReadout: document.getElementById('offset-readout'),
   idle: document.getElementById('idle'),
   idleText: document.getElementById('idle-text'),
   idleSub: document.getElementById('idle-sub'),
@@ -85,6 +98,8 @@ const state = {
   pendingPlay: null,  // {want, expires} while a play/pause is unconfirmed
   lastReported: null, // last raw position Plex gave us, to spot fresh reports
   offset: 0,          // manual LYRICS_OFFSET from the server
+  trackOffset: 0,     // this song's own nudge, set from the buttons
+  offsetSetAt: 0,     // performance.now() of the last local change
   lines: [],          // [{time, text}], time is null for unsynced lyrics
   lyricsId: null,     // identifies the lyrics on screen, so a better source
                       // arriving mid-track can replace them
@@ -114,10 +129,11 @@ function currentTime() {
   return state.duration > 0 ? Math.min(raw, state.duration) : raw;
 }
 
-/* The time we match lyric timestamps against. A positive LYRICS_OFFSET makes
-   lines appear later; a negative one makes them appear earlier. */
+/* The time we match lyric timestamps against. Positive offsets make lines
+   appear later, negative ones earlier. Two are applied: the server-wide
+   LYRICS_OFFSET, and this song's own nudge from the buttons. */
 function lyricTime() {
-  return currentTime() - state.offset;
+  return currentTime() - state.offset - state.trackOffset;
 }
 
 function trackKey(track) {
@@ -486,6 +502,57 @@ function updateEnded() {
   updateSourceLine();
 }
 
+/* --- lyric timing nudge ----------------------------------------- */
+
+function formatOffset(seconds) {
+  const ms = Math.round(seconds * 1000);
+  if (ms === 0) return '0 ms';
+  // A real minus sign, and an explicit plus, so the direction is unambiguous.
+  return `${ms > 0 ? '+' : '−'}${Math.abs(ms)} ms`;
+}
+
+function renderOffset() {
+  el.offsetReadout.textContent = formatOffset(state.trackOffset);
+  el.offsetControl.classList.toggle('adjusted', state.trackOffset !== 0);
+  el.offsetControl.hidden = !state.key;
+}
+
+/* Apply a new shift straight away, then tell the server to remember it. */
+async function setTrackOffset(seconds) {
+  const value = Math.max(-OFFSET_LIMIT,
+                         Math.min(OFFSET_LIMIT, Math.round(seconds * 1000) / 1000));
+  state.trackOffset = value;
+  state.offsetSetAt = performance.now();
+  renderOffset();
+
+  // Re-evaluate at once rather than waiting for the line to change on its own.
+  state.activeIndex = -1;
+  updateActiveLine(lyricTime());
+
+  try {
+    const response = await fetch('/api/offset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${response.status}`);
+    }
+  } catch (err) {
+    showControlError(`Could not save the shift: ${err.message}`);
+  }
+}
+
+function nudgeOffset(direction, event) {
+  const step = event && event.shiftKey ? OFFSET_COARSE_STEP : OFFSET_STEP;
+  setTrackOffset(state.trackOffset + direction * step);
+}
+
+el.offsetMinus.addEventListener('click', (e) => nudgeOffset(-1, e));
+el.offsetPlus.addEventListener('click', (e) => nudgeOffset(1, e));
+el.offsetReadout.addEventListener('click', () => setTrackOffset(0));
+
 function showIdle(text, sub) {
   el.idleText.textContent = text;
   el.idleSub.textContent = sub || '';
@@ -523,6 +590,7 @@ async function poll() {
     state.playing = false;
     state.ended = false;
     state.anchored = false;
+    el.offsetControl.hidden = true;
     showIdle('Waiting for music…', 'Start a track on Plex and it will appear here.');
     return;
   }
@@ -583,6 +651,17 @@ async function poll() {
   }
 
   state.offset = data.offset || 0;
+
+  // Adopt the stored shift for this song, unless a press is still settling.
+  const stored = data.track_offset || 0;
+  if (trackChanged
+      || performance.now() - state.offsetSetAt > OFFSET_SETTLE_MS) {
+    if (stored !== state.trackOffset) {
+      state.trackOffset = stored;
+      state.activeIndex = -1;   // the current line may now be a different one
+    }
+  }
+  renderOffset();
   const wasPlaying = state.playing;
   const reportedPlaying = track.state === 'playing';
 

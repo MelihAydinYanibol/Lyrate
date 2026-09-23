@@ -266,6 +266,24 @@ The one thing this cannot fix is seeking: after you skip, the display stays
 wrong until your player next reports in, which can take as long as the gap
 above.
 
+### Nudging a song's timing
+
+Bottom left is a small **− / +700 ms / +** control. It shifts the lyrics for
+the song currently playing: **+** delays them, **−** pulls them earlier. One
+press moves 100 ms, shift-click moves 500 ms, and clicking the number resets
+it to zero.
+
+Each song's shift is remembered, so a track you dialled in once stays that way
+next time it plays. They live in `lyric_offsets.json`, keyed by title, artist
+and duration - not by Plex's rating key, so re-importing your library does not
+lose them. The file is ignored by git, since it is yours rather than the
+project's. Shifts are capped at thirty seconds either way; past that the
+lyrics are not out of step, they are the wrong file.
+
+This is the per-song version of the setting below, and it is applied on top of
+it. Reach for this one when a single song is off, and for `LYRICS_OFFSET` when
+everything is.
+
 If lyrics are consistently early or late across every song, nudge them:
 
 ```

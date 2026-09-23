@@ -511,6 +511,83 @@ html, body {
   color: var(--dimmer);
 }
 
+/* --- Lyric timing nudge ----------------------------------------- */
+
+.offset-control {
+  position: fixed;
+  z-index: 3;
+  left: max(var(--gutter), env(safe-area-inset-left));
+  bottom: max(var(--gutter), env(safe-area-inset-bottom));
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  /* Stays out of the way until you go looking for it. */
+  opacity: 0.45;
+  transition: opacity 0.2s var(--ease), background-color 0.2s var(--ease);
+}
+
+.offset-control:hover,
+.offset-control:focus-within,
+.offset-control.adjusted {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.offset-btn,
+.offset-readout {
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.78);
+  font: inherit;
+  cursor: pointer;
+  border-radius: 999px;
+  transition: background-color 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.offset-btn {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.offset-readout {
+  min-width: 72px;
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  color: var(--dim);
+}
+
+/* Once it is not zero, say so plainly. */
+.offset-control.adjusted .offset-readout { color: #fff; }
+
+.offset-btn:hover,
+.offset-readout:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
+
+.offset-btn:active { transform: scale(0.9); }
+
+.offset-btn:focus-visible,
+.offset-readout:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.5);
+}
+
+@media (hover: none) {
+  .offset-control { opacity: 1; }
+  .offset-btn { width: 38px; height: 38px; font-size: 17px; }
+  .offset-readout { min-width: 78px; font-size: 12.5px; }
+}
+
 /* --- Idle / error state ---------------------------------------- */
 
 .idle {

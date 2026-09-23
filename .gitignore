@@ -48,3 +48,6 @@ Thumbs.db
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Per-song lyric shifts, set from the UI
+lyric_offsets.json

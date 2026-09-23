@@ -94,6 +94,16 @@
   </div>
 </div>
 
+<!-- Per-song lyric timing nudge, bottom left -->
+<div class="offset-control" id="offset-control" hidden>
+  <button class="offset-btn" id="offset-minus" type="button"
+          aria-label="Shift lyrics earlier" title="Lyrics earlier">&minus;</button>
+  <button class="offset-readout" id="offset-readout" type="button"
+          aria-live="polite" title="Click to reset to 0">0 ms</button>
+  <button class="offset-btn" id="offset-plus" type="button"
+          aria-label="Shift lyrics later" title="Lyrics later">+</button>
+</div>
+
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

@@ -1,6 +1,7 @@
 """Lyrate web UI - a live lyrics display for whatever is playing on Plex."""
 
 import hashlib
+import json
 import os
 import threading
 import time
@@ -21,6 +22,52 @@ OBSERVED_USER = os.getenv("OBSERVED_USER")  # only follow this Plex user, if set
 # Positive values push the lyrics later. Some Plex clients report their
 # position lazily, and some LRC files are simply transcribed a beat off.
 LYRICS_OFFSET = float(os.getenv("LYRICS_OFFSET", "0"))
+
+# Per-song nudges, on top of LYRICS_OFFSET. Kept in a small file so they
+# survive a restart - an offset you dialled in once should stay dialled in.
+OFFSETS_FILE = os.getenv("LYRIC_OFFSETS_FILE", "lyric_offsets.json")
+# Beyond this the lyrics are not merely out of step, they are the wrong file.
+MAX_OFFSET = 30.0
+
+_offsets = {}
+_offsets_lock = threading.Lock()
+
+
+def _offset_key(track):
+    """Identify a song across restarts, independent of Plex's rating keys."""
+    return "|".join([
+        (track.get("title") or "").strip().casefold(),
+        (track.get("artist") or "").strip().casefold(),
+        str(round(track.get("duration") or 0)),
+    ])
+
+
+def _load_offsets():
+    try:
+        with open(OFFSETS_FILE, encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            return {k: float(v) for k, v in data.items()}
+    except FileNotFoundError:
+        pass
+    except (ValueError, OSError):
+        # A corrupt file should not stop the app; it is only a convenience.
+        pass
+    return {}
+
+
+def _save_offsets():
+    """Write via a temporary file so a crash cannot leave a half-written one."""
+    temporary = f"{OFFSETS_FILE}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(_offsets, handle, indent=1, sort_keys=True)
+        os.replace(temporary, OFFSETS_FILE)
+    except OSError:
+        pass
+
+
+_offsets = _load_offsets()
 
 app = Flask(__name__)
 
@@ -192,8 +239,40 @@ def now_playing():
             # not run behind by the length of the request.
             "sample_age": time.monotonic() - sampled_at,
             "offset": LYRICS_OFFSET,
+            # This song's own nudge, set from the buttons in the UI.
+            "track_offset": _offsets.get(_offset_key(track), 0.0),
         }
     )
+
+
+@app.route("/api/offset", methods=["POST"])
+def set_offset():
+    """Store a per-song lyric shift, in seconds. Positive delays the lyrics."""
+    body = request.get_json(silent=True) or {}
+    try:
+        value = float(body.get("value", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "value must be a number"}), 400
+    value = max(-MAX_OFFSET, min(MAX_OFFSET, round(value, 3)))
+
+    try:
+        tracks = get_now_playing()
+    except (requests.RequestException, RuntimeError) as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    track = pick_track(tracks)
+    if not track:
+        return jsonify({"error": "Nothing is playing"}), 409
+
+    key = _offset_key(track)
+    with _offsets_lock:
+        if value:
+            _offsets[key] = value
+        else:
+            _offsets.pop(key, None)   # zero is the default; do not store it
+        _save_offsets()
+
+    return jsonify({"ok": True, "value": value})
 
 
 @app.route("/api/control/<command>", methods=["POST"])
